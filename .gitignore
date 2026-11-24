@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/bin/
+src-tauri/relay/target/
+
+# Environment & local state
+.env
+.env.*
+*.local
+
+# macOS
+.DS_Store
+*.app
+*.dmg
+
+# Logs
+*.log

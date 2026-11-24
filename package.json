@@ -1,0 +1,30 @@
+{
+  "name": "antigravity-floating-dock",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "build:relay": "cargo build --manifest-path src-tauri/relay/Cargo.toml --release --target aarch64-apple-darwin && mkdir -p src-tauri/bin && cp src-tauri/relay/target/aarch64-apple-darwin/release/agy-dock-hook-relay src-tauri/bin/agy-dock-hook-relay-aarch64-apple-darwin",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-global-shortcut": "^2",
+    "lucide-react": "^1.79.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/react": "^19.3.1",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.1"
+  }
+}

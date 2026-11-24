@@ -1,0 +1,28 @@
+[package]
+name = "antigravity-floating-dock"
+version = "0.1.0"
+description = "Lightweight macOS floating companion for monitoring Antigravity agent activity"
+authors = ["Antigravity Floating Dock Contributors"]
+edition = "2021"
+autobins = false
+default-run = "antigravity-floating-dock"
+
+[lib]
+name = "antigravity_floating_dock_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "antigravity-floating-dock"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
+tauri-plugin-global-shortcut = "2"
+window-vibrancy = "0.8.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["net", "io-util", "sync", "time", "macros", "rt"] }
+dirs = "6"
