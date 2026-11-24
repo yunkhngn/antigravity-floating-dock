@@ -5,8 +5,10 @@ import {
   hideChat,
   installHooks,
   openAntigravity,
+  openExternalUrl,
   quitApp,
   refreshConversations,
+  refreshModels,
   removeQueueItem,
   requestAccessibilityPermission,
   saveAttachmentImage,
@@ -14,11 +16,17 @@ import {
   sendMessageToAntigravity,
   setBubblePinned,
   setChatExpanded,
+  startNewConversation,
   uninstallHooks,
   updateSettings,
   verifyHooks,
 } from "../api";
-import { formatRelativeTime, shortenId, stateLabel } from "../format";
+import {
+  formatRelativeTime,
+  formatTokenCount,
+  shortenId,
+  stateLabel,
+} from "../format";
 import {
   FilledCheckCircleIcon,
   FilledCloseIcon,
@@ -61,6 +69,9 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
   const [tab, setTab] = useState<ActiveTab>("activity");
   const [expanded, setExpanded] = useState(false);
   const [showInspector, setShowInspector] = useState(false);
+  const [newSessionMode, setNewSessionMode] = useState(false);
+  const [selectedModel, setSelectedModel] = useState("");
+  const [loadingModels, setLoadingModels] = useState(false);
   const [expandedActivityKey, setExpandedActivityKey] = useState<Record<string, boolean>>({});
   const [liveStepsExpanded, setLiveStepsExpanded] = useState(true);
   const [draft, setDraft] = useState("");
@@ -83,16 +94,29 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
     function handleKeyDown(e: globalThis.KeyboardEvent) {
       if (e.key === "Escape") {
         e.preventDefault();
+        if (showInspector) {
+          setShowInspector(false);
+          return;
+        }
         void hideChat();
       }
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  }, [showInspector]);
 
   useEffect(() => {
     void refreshConversations().catch(() => {});
+    if (snapshot.availableModels.length === 0) {
+      void refreshModels().catch(() => {});
+    }
   }, [snapshot.status.sidecarConnected]);
+
+  useEffect(() => {
+    if (!selectedModel && snapshot.availableModels.length > 0) {
+      setSelectedModel(snapshot.availableModels[0].id);
+    }
+  }, [selectedModel, snapshot.availableModels]);
 
   useEffect(() => {
     if (tab === "settings") {
@@ -119,6 +143,8 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
     recentEvents,
     selectedConversationId,
     conversations,
+    availableModels,
+    sessionUsage,
     queuedMessages,
     transcriptTail,
     transcriptError,
@@ -207,10 +233,32 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
   }
 
   async function handleSelectSession(cid: string) {
+    if (cid === "__new__") {
+      setNewSessionMode(true);
+      if (availableModels.length === 0) {
+        void handleRefreshModels();
+      }
+      return;
+    }
+    setNewSessionMode(false);
     try {
       await selectConversation(cid === "__auto__" ? null : cid);
     } catch (err) {
       setActionNotice(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleRefreshModels() {
+    setLoadingModels(true);
+    try {
+      const list = await refreshModels();
+      if (!selectedModel && list.length > 0) {
+        setSelectedModel(list[0].id);
+      }
+    } catch (err) {
+      setActionNotice(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoadingModels(false);
     }
   }
 
@@ -268,6 +316,15 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
     setActionNotice(null);
 
     try {
+      if (newSessionMode) {
+        await startNewConversation(text, selectedModel || null);
+        setDraft("");
+        setAttachments([]);
+        setNewSessionMode(false);
+        onRefresh();
+        return;
+      }
+
       const result = await sendMessageToAntigravity({
         message: text,
         expectedConversationId: targetConversationId,
@@ -293,7 +350,12 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
       }
       onRefresh();
     } catch (err) {
-      setActionNotice(err instanceof Error ? err.message : String(err));
+      const raw = err instanceof Error ? err.message : String(err);
+      setActionNotice(
+        raw.includes("unknown_action")
+          ? "Sidecar Bridge updated — restart Antigravity once to enable starting a new session with model selection."
+          : raw,
+      );
     } finally {
       setSending(false);
     }
@@ -330,7 +392,7 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
   }
 
   function handleComposerKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       void handleSendMessage();
     }
@@ -464,7 +526,7 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
             <div className="session-picker-row">
               <select
                 className="session-select"
-                value={selectedConversationId ?? "__auto__"}
+                value={newSessionMode ? "__new__" : (selectedConversationId ?? "__auto__")}
                 onChange={(e) => void handleSelectSession(e.target.value)}
                 aria-label="Select conversation session"
               >
@@ -475,12 +537,27 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
                     : "latest"}
                   )
                 </option>
+                <option value="__new__">+ New Session (choose model)…</option>
                 {conversations.map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.title} {c.runState === "RUN_STATE_RUNNING" ? "●" : ""} ({shortenId(c.id)})
                   </option>
                 ))}
               </select>
+              <button
+                type="button"
+                className={`pill-toggle ${newSessionMode ? "active" : ""}`}
+                onClick={() => {
+                  const next = !newSessionMode;
+                  setNewSessionMode(next);
+                  if (next && availableModels.length === 0) {
+                    void handleRefreshModels();
+                  }
+                }}
+                title="Start a new Antigravity session with a chosen model"
+              >
+                <span className="pill-toggle-label">+ New</span>
+              </button>
               <button
                 type="button"
                 className="icon-btn"
@@ -494,28 +571,74 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
                 type="button"
                 className={`pill-toggle ${showInspector ? "active" : ""}`}
                 onClick={() => setShowInspector((prev) => !prev)}
-                title="Toggle session details and recent events"
+                title="Toggle session details, model usage, and recent events"
               >
                 <span className={`badge ${activeEvent?.activityState ?? "unknown"}`}>
                   {stateLabel(activeEvent?.activityState)}
                 </span>
                 <span className="pill-toggle-label">
-                  {showInspector ? "Hide info" : "Info"}
+                  {showInspector ? "Hide" : "Info"}
                 </span>
               </button>
             </div>
-            {(activeEvent?.summary || selectedConversationMeta?.title) && (
+            {newSessionMode && (
+              <div className="model-picker-row">
+                <span className="model-picker-label">Model</span>
+                <select
+                  className="session-select"
+                  value={selectedModel}
+                  onChange={(e) => setSelectedModel(e.target.value)}
+                  aria-label="Select model for new session"
+                >
+                  {availableModels.length > 0 ? (
+                    availableModels.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.label}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="">
+                      {loadingModels ? "Loading models…" : "Default model"}
+                    </option>
+                  )}
+                </select>
+                <button
+                  type="button"
+                  className="icon-btn"
+                  onClick={() => void handleRefreshModels()}
+                  disabled={loadingModels}
+                  title="Refresh models (`agy models`)"
+                >
+                  <FilledRefreshIcon size={12} />
+                </button>
+              </div>
+            )}
+            {(activeEvent?.summary || selectedConversationMeta?.title || sessionUsage) && (
               <div className="session-status-line">
                 <span>
-                  {activeEvent?.summary ??
-                    selectedConversationMeta?.title ??
-                    "Ready"}
+                  {newSessionMode
+                    ? "New conversation · pick model & send"
+                    : (activeEvent?.summary ?? selectedConversationMeta?.title ?? "Ready")}
                 </span>
-                {activeEvent && (
-                  <span className="session-status-time">
-                    {formatRelativeTime(activeEvent.timestampMs)}
-                  </span>
-                )}
+                <span className="session-status-meta">
+                  {sessionUsage && !newSessionMode && (
+                    <button
+                      type="button"
+                      className="usage-pill"
+                      onClick={() => setShowInspector(true)}
+                      title={`Model: ${sessionUsage.model ?? "unknown"} · Input: ${sessionUsage.inputTokens.toLocaleString()} · Cached: ${sessionUsage.cacheReadTokens.toLocaleString()} · Output: ${sessionUsage.outputTokens.toLocaleString()} (${sessionUsage.turns} turns)`}
+                    >
+                      {sessionUsage.model ? `${sessionUsage.model} · ` : ""}
+                      {formatTokenCount(sessionUsage.inputTokens)} in ·{" "}
+                      {formatTokenCount(sessionUsage.outputTokens)} out
+                    </button>
+                  )}
+                  {activeEvent && (
+                    <span className="session-status-time">
+                      {formatRelativeTime(activeEvent.timestampMs)}
+                    </span>
+                  )}
+                </span>
               </div>
             )}
           </div>
@@ -584,44 +707,6 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
                   </button>
                 </div>
               </div>
-            )}
-
-            {showInspector && (
-              <section className="card inspector-card">
-                <div className="card-title-row">
-                  <span className="card-label">Session Metadata</span>
-                  <button type="button" className="icon-btn" onClick={onRefresh} title="Refresh">
-                    <FilledRefreshIcon size={13} />
-                  </button>
-                </div>
-                {activeEvent || selectedConversationMeta ? (
-                  <div className="kv-grid">
-                    <span className="kv-key">Session</span>
-                    <span className="kv-val">{targetConversationId ?? "Not supplied"}</span>
-                    <span className="kv-key">Workspace</span>
-                    <span className="kv-val">{activeEvent?.workspacePath ?? "Not supplied"}</span>
-                    <span className="kv-key">Model</span>
-                    <span className="kv-val">{activeEvent?.modelName ?? "Not supplied"}</span>
-                  </div>
-                ) : (
-                  <div className="hint-text">No lifecycle events received yet.</div>
-                )}
-
-                {recentEvents.length > 0 && (
-                  <div className="event-list">
-                    <span className="card-label">Recent Events</span>
-                    {recentEvents.slice(0, 5).map((ev) => (
-                      <div key={ev.id} className="event-row">
-                        <div className="event-row-main">
-                          <span className="event-row-title">{ev.summary}</span>
-                          {ev.detail && <span className="event-row-detail">{ev.detail}</span>}
-                        </div>
-                        <span className="event-row-time">{formatRelativeTime(ev.timestampMs)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </section>
             )}
 
             {transcriptTail.length > 0 ? (
@@ -839,7 +924,7 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
               )}
               <textarea
                 className="composer-input"
-                placeholder="Ask anything, @ to mention, ⌘+V to paste image…"
+                placeholder="Message Antigravity (Enter to send · Shift+Enter newline · ⌘+V image)…"
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={handleComposerKeyDown}
@@ -907,9 +992,11 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
                   <span>
                     {sending
                       ? "Sending…"
-                      : activeEvent?.activityState === "working" || queuedMessages.length > 0
-                        ? "Queue"
-                        : "Send"}
+                      : newSessionMode
+                        ? "Start"
+                        : activeEvent?.activityState === "working" || queuedMessages.length > 0
+                          ? "Queue"
+                          : "Send"}
                   </span>
                 </button>
               </div>
@@ -1119,8 +1206,103 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
                 </button>
               </div>
             </section>
+
+            <section className="card">
+              <div className="card-title-row">
+                <span className="card-label">Credits</span>
+                <span className="hint-text">@yunkhngn · MIT</span>
+              </div>
+              <div className="btn-row">
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => void openExternalUrl("https://github.com/yunkhngn")}
+                >
+                  <FilledExternalIcon size={13} />
+                  <span>GitHub (@yunkhngn)</span>
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => void openExternalUrl("https://buymeacoffee.com/yunkhngn")}
+                >
+                  <FilledExternalIcon size={13} />
+                  <span>Buy Me a Coffee</span>
+                </button>
+              </div>
+            </section>
           </div>
         )}
+
+      {showInspector && (
+        <div
+          className="info-modal-backdrop"
+          onClick={() => setShowInspector(false)}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Session info"
+        >
+          <div className="info-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="card-title-row">
+              <span className="card-label">Session Info</span>
+              <div className="btn-row">
+                <button type="button" className="icon-btn" onClick={onRefresh} title="Refresh">
+                  <FilledRefreshIcon size={13} />
+                </button>
+                <button
+                  type="button"
+                  className="icon-btn"
+                  onClick={() => setShowInspector(false)}
+                  title="Close (Esc)"
+                  aria-label="Close session info"
+                >
+                  <FilledCloseIcon size={13} />
+                </button>
+              </div>
+            </div>
+
+            {activeEvent || selectedConversationMeta || sessionUsage ? (
+              <div className="kv-grid">
+                <span className="kv-key">Session</span>
+                <span className="kv-val">{targetConversationId ?? "Not supplied"}</span>
+                <span className="kv-key">Workspace</span>
+                <span className="kv-val">{activeEvent?.workspacePath ?? "Not supplied"}</span>
+                <span className="kv-key">Model</span>
+                <span className="kv-val">
+                  {sessionUsage?.model ?? activeEvent?.modelName ?? "Not supplied"}
+                </span>
+                {sessionUsage && (
+                  <>
+                    <span className="kv-key">Tokens</span>
+                    <span className="kv-val">
+                      {formatTokenCount(sessionUsage.inputTokens)} in ·{" "}
+                      {formatTokenCount(sessionUsage.cacheReadTokens)} cached ·{" "}
+                      {formatTokenCount(sessionUsage.outputTokens)} out ({sessionUsage.turns} turns)
+                    </span>
+                  </>
+                )}
+              </div>
+            ) : (
+              <div className="hint-text">No lifecycle events received yet.</div>
+            )}
+
+            {recentEvents.length > 0 && (
+              <div className="event-list">
+                <span className="card-label">Recent Events</span>
+                {recentEvents.slice(0, 6).map((ev) => (
+                  <div key={ev.id} className="event-row">
+                    <div className="event-row-main">
+                      <span className="event-row-title">{ev.summary}</span>
+                      {ev.detail && <span className="event-row-detail">{ev.detail}</span>}
+                    </div>
+                    <span className="event-row-time">{formatRelativeTime(ev.timestampMs)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

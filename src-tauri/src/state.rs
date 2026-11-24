@@ -14,7 +14,8 @@ use crate::diagnostics::DiagnosticLogger;
 use crate::hooks;
 use crate::models::{
     AgentActivityState, ConnectionStatus, ConversationSummary, DockEvent, DockEventType,
-    DockSettings, DockSnapshot, QueuedMessage, QueuedMessageStatus, TranscriptMessage,
+    DockSettings, DockSnapshot, ModelOption, QueuedMessage, QueuedMessageStatus,
+    SessionTokenUsage, TranscriptMessage,
 };
 use crate::paths;
 use crate::redact::redact_string;
@@ -29,6 +30,8 @@ struct InnerState {
     recent_events: VecDeque<DockEvent>,
     selected_conversation_id: Option<String>,
     conversations: Vec<ConversationSummary>,
+    available_models: Vec<ModelOption>,
+    session_usage: Option<SessionTokenUsage>,
     queued_messages: Vec<QueuedMessage>,
     queue_flushing: bool,
     transcript_paths_by_cid: HashMap<String, String>,
@@ -65,6 +68,8 @@ impl AppState {
                 recent_events: VecDeque::with_capacity(MAX_RECENT_EVENTS),
                 selected_conversation_id: None,
                 conversations: Vec::new(),
+                available_models: Vec::new(),
+                session_usage: None,
                 queued_messages: Vec::new(),
                 queue_flushing: false,
                 transcript_paths_by_cid: HashMap::new(),
@@ -181,7 +186,7 @@ impl AppState {
 
         let transcript_result = resolved_transcript_path
             .as_deref()
-            .map(|p| self.session_adapter.read_transcript_tail(p, 24));
+            .map(|p| self.session_adapter.read_transcript_with_usage(p, 24));
 
         let is_clean_stop = event.event_type == DockEventType::Stop
             && matches!(event.termination_reason.as_deref(), Some("NO_TOOL_CALL") | None)
@@ -223,8 +228,9 @@ impl AppState {
                     || g.selected_conversation_id.as_deref() == event.conversation_id.as_deref();
                 if should_update_transcript {
                     match transcript_result {
-                        Some(Ok(items)) => {
+                        Some(Ok((items, usage))) => {
                             g.transcript_tail = items;
+                            g.session_usage = usage;
                             g.transcript_error = None;
                         }
                         Some(Err(err)) => {
@@ -350,7 +356,7 @@ impl AppState {
         let Some(path) = path_opt else {
             return;
         };
-        let Ok(items) = self.session_adapter.read_transcript_tail(&path, 24) else {
+        let Ok((items, usage)) = self.session_adapter.read_transcript_with_usage(&path, 24) else {
             return;
         };
 
@@ -362,9 +368,11 @@ impl AppState {
             let next_last_steps = items.last().map(|m| m.steps.len());
             let differs = prev_len != items.len()
                 || prev_last_text != next_last_text
-                || prev_last_steps != next_last_steps;
+                || prev_last_steps != next_last_steps
+                || g.session_usage != usage;
             if differs {
                 g.transcript_tail = items;
+                g.session_usage = usage;
                 g.transcript_error = None;
             }
             differs
@@ -438,13 +446,14 @@ impl AppState {
 
         let initial_transcript = initial_target_path
             .as_deref()
-            .and_then(|p| self.session_adapter.read_transcript_tail(p, 16).ok());
+            .and_then(|p| self.session_adapter.read_transcript_with_usage(p, 24).ok());
 
         if let Ok(mut g) = self.inner.write() {
             g.conversations = merged.clone();
             if g.transcript_tail.is_empty() {
-                if let Some(items) = initial_transcript {
+                if let Some((items, usage)) = initial_transcript {
                     g.transcript_tail = items;
+                    g.session_usage = usage;
                     g.transcript_error = None;
                 }
             }
@@ -453,6 +462,17 @@ impl AppState {
             self.emit_snapshot(app);
         }
         Ok(merged)
+    }
+
+    pub fn refresh_models(&self, app_handle: Option<&AppHandle>) -> Result<Vec<ModelOption>, String> {
+        let models = self.session_adapter.list_available_models()?;
+        if let Ok(mut g) = self.inner.write() {
+            g.available_models = models.clone();
+        }
+        if let Some(app) = app_handle {
+            self.emit_snapshot(app);
+        }
+        Ok(models)
     }
 
     pub fn select_conversation(
@@ -483,21 +503,24 @@ impl AppState {
 
         let transcript_result = known_path
             .as_deref()
-            .map(|p| self.session_adapter.read_transcript_tail(p, 16));
+            .map(|p| self.session_adapter.read_transcript_with_usage(p, 24));
 
         if let Ok(mut g) = self.inner.write() {
             g.selected_conversation_id = cleaned;
             match transcript_result {
-                Some(Ok(items)) => {
+                Some(Ok((items, usage))) => {
                     g.transcript_tail = items;
+                    g.session_usage = usage;
                     g.transcript_error = None;
                 }
                 Some(Err(err)) => {
                     g.transcript_tail.clear();
+                    g.session_usage = None;
                     g.transcript_error = Some(err);
                 }
                 None => {
                     g.transcript_tail.clear();
+                    g.session_usage = None;
                     g.transcript_error = if target_cid.is_some() {
                         Some("No JSONL transcript file found for this session yet.".to_string())
                     } else {
@@ -544,6 +567,8 @@ impl AppState {
             recent_events: guard.recent_events.iter().cloned().collect(),
             selected_conversation_id: guard.selected_conversation_id.clone(),
             conversations: guard.conversations.clone(),
+            available_models: guard.available_models.clone(),
+            session_usage: guard.session_usage.clone(),
             queued_messages: guard.queued_messages.clone(),
             transcript_tail: guard.transcript_tail.clone(),
             transcript_error: guard.transcript_error.clone(),

@@ -5,7 +5,9 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::adapters::{desktop_interaction, sidecar_bridge};
-use crate::models::{ConversationSummary, SessionCapabilities, TranscriptMessage};
+use crate::models::{
+    ConversationSummary, ModelOption, SessionCapabilities, SessionTokenUsage, TranscriptMessage,
+};
 use crate::paths;
 use crate::redact::{redact_string, redact_text_with_limit};
 
@@ -14,11 +16,11 @@ const MAX_MESSAGE_CHARS: usize = 8000;
 
 pub trait SessionAdapter: Send + Sync {
     fn capabilities(&self, source_product: &str) -> SessionCapabilities;
-    fn read_transcript_tail(
+    fn read_transcript_with_usage(
         &self,
         transcript_path: &str,
         max_items: usize,
-    ) -> Result<Vec<TranscriptMessage>, String>;
+    ) -> Result<(Vec<TranscriptMessage>, Option<SessionTokenUsage>), String>;
     fn resolve_transcript_for_conversation(&self, conversation_id: &str) -> Option<String>;
     fn open_antigravity(&self, source_product: &str, conversation_id: Option<&str>) -> Result<(), String>;
     fn is_antigravity_running(&self) -> bool;
@@ -60,99 +62,12 @@ impl SessionAdapter for AntigravitySessionAdapter {
         }
     }
 
-    fn read_transcript_tail(
+    fn read_transcript_with_usage(
         &self,
         transcript_path: &str,
         max_items: usize,
-    ) -> Result<Vec<TranscriptMessage>, String> {
-        let candidate = Path::new(transcript_path);
-        let canonical = fs::canonicalize(candidate)
-            .map_err(|_| "Transcript path is missing or inaccessible".to_string())?;
-
-        let allowed = paths::allowed_transcript_roots().iter().any(|root| {
-            fs::canonicalize(root)
-                .map(|canon_root| canonical.starts_with(&canon_root))
-                .unwrap_or(false)
-        });
-
-        if !allowed {
-            return Err("Transcript path is outside allowed Antigravity directories".to_string());
-        }
-
-        let meta = fs::metadata(&canonical)
-            .map_err(|_| "Unable to read transcript metadata".to_string())?;
-        if !meta.is_file() {
-            return Err("Transcript path is not a regular file".to_string());
-        }
-
-        let ext = canonical
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if ext != "jsonl" && ext != "json" {
-            return Err("Transcript format is not a readable JSONL log".to_string());
-        }
-
-        let mut file =
-            File::open(&canonical).map_err(|_| "Failed to open transcript file".to_string())?;
-        let file_len = meta.len();
-        if file_len > MAX_TAIL_READ_BYTES {
-            let offset = file_len - MAX_TAIL_READ_BYTES;
-            file.seek(SeekFrom::Start(offset))
-                .map_err(|_| "Failed to seek transcript tail".to_string())?;
-        }
-
-        let mut raw = String::new();
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .map_err(|_| "Failed to read transcript contents".to_string())?;
-        raw.push_str(&String::from_utf8_lossy(&bytes));
-
-        let mut parsed: Vec<TranscriptMessage> = Vec::new();
-        let lines: Vec<&str> = raw.lines().collect();
-        let start_idx = if file_len > MAX_TAIL_READ_BYTES && !lines.is_empty() {
-            1
-        } else {
-            0
-        };
-
-        for line in &lines[start_idx..] {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
-                if let Some(mut msg) = extract_transcript_message(&val) {
-                    if msg.role == "Activity" {
-                        if let Some(prev) = parsed.last_mut() {
-                            if prev.role == "Activity" {
-                                prev.steps.extend(msg.steps);
-                                if msg.timestamp.is_some() {
-                                    prev.timestamp = msg.timestamp;
-                                }
-                                continue;
-                            }
-                        }
-                    } else if msg.role == "Assistant" {
-                        if let Some(prev) = parsed.last_mut() {
-                            if prev.role == "Activity" {
-                                let mut combined = std::mem::take(&mut prev.steps);
-                                combined.extend(msg.steps);
-                                msg.steps = combined;
-                                parsed.pop();
-                            }
-                        }
-                    }
-                    parsed.push(msg);
-                }
-            }
-        }
-
-        if parsed.len() > max_items {
-            parsed.drain(0..(parsed.len() - max_items));
-        }
-        Ok(parsed)
+    ) -> Result<(Vec<TranscriptMessage>, Option<SessionTokenUsage>), String> {
+        self.read_transcript_with_usage_impl(transcript_path, max_items)
     }
 
     fn resolve_transcript_for_conversation(&self, conversation_id: &str) -> Option<String> {
@@ -230,6 +145,142 @@ impl SessionAdapter for AntigravitySessionAdapter {
 }
 
 impl AntigravitySessionAdapter {
+    fn read_transcript_with_usage_impl(
+        &self,
+        transcript_path: &str,
+        max_items: usize,
+    ) -> Result<(Vec<TranscriptMessage>, Option<SessionTokenUsage>), String> {
+        let candidate = Path::new(transcript_path);
+        let canonical = fs::canonicalize(candidate)
+            .map_err(|_| "Transcript path is missing or inaccessible".to_string())?;
+
+        let allowed = paths::allowed_transcript_roots().iter().any(|root| {
+            fs::canonicalize(root)
+                .map(|canon_root| canonical.starts_with(&canon_root))
+                .unwrap_or(false)
+        });
+
+        if !allowed {
+            return Err("Transcript path is outside allowed Antigravity directories".to_string());
+        }
+
+        let meta = fs::metadata(&canonical)
+            .map_err(|_| "Unable to read transcript metadata".to_string())?;
+        if !meta.is_file() {
+            return Err("Transcript path is not a regular file".to_string());
+        }
+
+        let ext = canonical
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if ext != "jsonl" && ext != "json" {
+            return Err("Transcript format is not a readable JSONL log".to_string());
+        }
+
+        let mut file =
+            File::open(&canonical).map_err(|_| "Failed to open transcript file".to_string())?;
+        let file_len = meta.len();
+        if file_len > MAX_TAIL_READ_BYTES {
+            let offset = file_len - MAX_TAIL_READ_BYTES;
+            file.seek(SeekFrom::Start(offset))
+                .map_err(|_| "Failed to seek transcript tail".to_string())?;
+        }
+
+        let mut raw = String::new();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|_| "Failed to read transcript contents".to_string())?;
+        raw.push_str(&String::from_utf8_lossy(&bytes));
+
+        let mut parsed: Vec<TranscriptMessage> = Vec::new();
+        let mut usage = SessionTokenUsage {
+            model: None,
+            input_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: 0,
+            turns: 0,
+        };
+
+        let lines: Vec<&str> = raw.lines().collect();
+        let start_idx = if file_len > MAX_TAIL_READ_BYTES && !lines.is_empty() {
+            1
+        } else {
+            0
+        };
+
+        for line in &lines[start_idx..] {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
+                accumulate_usage(&val, &mut usage);
+                if let Some(mut msg) = extract_transcript_message(&val) {
+                    if msg.role == "Activity" {
+                        if let Some(prev) = parsed.last_mut() {
+                            if prev.role == "Activity" {
+                                prev.steps.extend(msg.steps);
+                                if msg.timestamp.is_some() {
+                                    prev.timestamp = msg.timestamp;
+                                }
+                                continue;
+                            }
+                        }
+                    } else if msg.role == "Assistant" {
+                        if let Some(prev) = parsed.last_mut() {
+                            if prev.role == "Activity" {
+                                let mut combined = std::mem::take(&mut prev.steps);
+                                combined.extend(msg.steps);
+                                msg.steps = combined;
+                                parsed.pop();
+                            }
+                        }
+                    }
+                    parsed.push(msg);
+                }
+            }
+        }
+
+        if parsed.len() > max_items {
+            parsed.drain(0..(parsed.len() - max_items));
+        }
+
+        let usage_opt = if usage.turns > 0 || usage.model.is_some() {
+            Some(usage)
+        } else {
+            None
+        };
+        Ok((parsed, usage_opt))
+    }
+
+    pub fn list_available_models(&self) -> Result<Vec<ModelOption>, String> {
+        let candidates = [
+            paths::home_dir().join(".local/bin/agy"),
+            std::path::PathBuf::from("/opt/homebrew/bin/agy"),
+            std::path::PathBuf::from("/usr/local/bin/agy"),
+            std::path::PathBuf::from("agy"),
+        ];
+
+        for bin in candidates {
+            let is_bare = bin == Path::new("agy");
+            if !is_bare && !bin.is_file() {
+                continue;
+            }
+            if let Ok(out) = Command::new(&bin).arg("models").output() {
+                if out.status.success() {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    let parsed = parse_agy_models_output(&stdout);
+                    if !parsed.is_empty() {
+                        return Ok(parsed);
+                    }
+                }
+            }
+        }
+        Err("Could not fetch models from `agy models` CLI.".to_string())
+    }
+
     pub fn list_local_conversations(&self, max_items: usize) -> Vec<(ConversationSummary, String)> {
         let mut entries: Vec<(std::time::SystemTime, ConversationSummary, String)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -331,6 +382,66 @@ fn extract_conversation_title(transcript_path: &Path) -> Option<String> {
         }
     }
     None
+}
+
+fn accumulate_usage(val: &Value, usage: &mut SessionTokenUsage) {
+    let Some(obj) = val.as_object() else {
+        return;
+    };
+    if let Some(model) = obj.get("model").and_then(|v| v.as_str()).map(str::trim) {
+        if !model.is_empty() {
+            usage.model = Some(model.to_string());
+        }
+    }
+    let in_tok = obj.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let cache_tok = obj
+        .get("cache_read_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let out_tok = obj
+        .get("output_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    if in_tok > 0 || cache_tok > 0 || out_tok > 0 {
+        usage.input_tokens = usage.input_tokens.saturating_add(in_tok);
+        usage.cache_read_tokens = usage.cache_read_tokens.saturating_add(cache_tok);
+        usage.output_tokens = usage.output_tokens.saturating_add(out_tok);
+        usage.turns += 1;
+    }
+}
+
+pub fn parse_agy_models_output(raw: &str) -> Vec<ModelOption> {
+    let mut models = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for segment in raw.split(['\n', '\r']) {
+        let trimmed = segment.trim();
+        if trimmed.is_empty() || trimmed.contains("Fetching available models") {
+            continue;
+        }
+        let Some((id_part, label_part)) = trimmed.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let id = id_part.trim();
+        let label = label_part.trim();
+        if id.is_empty()
+            || label.is_empty()
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            || !id.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+        {
+            continue;
+        }
+        if seen.insert(id.to_string()) {
+            models.push(ModelOption {
+                id: id.to_string(),
+                label: label.to_string(),
+            });
+        }
+    }
+
+    models
 }
 
 fn clean_tool_arg(val: Option<&Value>) -> Option<String> {
@@ -516,7 +627,7 @@ mod tests {
     fn rejects_arbitrary_paths_outside_gemini() {
         let adapter = AntigravitySessionAdapter;
         let err = adapter
-            .read_transcript_tail("/etc/passwd", 10)
+            .read_transcript_with_usage("/etc/passwd", 10)
             .unwrap_err();
         assert!(
             err.contains("outside allowed") || err.contains("missing"),
@@ -561,5 +672,36 @@ mod tests {
             parsed_asst.steps,
             vec!["Analyzed state.rs".to_string(), "Ran Verify checks".to_string()]
         );
+    }
+
+    #[test]
+    fn parses_agy_models_and_usage_cleanly() {
+        let sample = "\r⠋ Fetching available models...\r\ngemini-4-hydrogen-high    Gemini 4 Hydrogen (High)\nclaude-sonnet-4-6         Claude Sonnet 4.6 (Thinking)\n";
+        let models = parse_agy_models_output(sample);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "gemini-4-hydrogen-high");
+        assert_eq!(models[0].label, "Gemini 4 Hydrogen (High)");
+        assert_eq!(models[1].id, "claude-sonnet-4-6");
+
+        let mut usage = SessionTokenUsage {
+            model: None,
+            input_tokens: 0,
+            cache_read_tokens: 0,
+            output_tokens: 0,
+            turns: 0,
+        };
+        let row = json!({
+            "type": "PLANNER_RESPONSE",
+            "model": "gemini-4-hydrogen-high",
+            "input_tokens": 1200,
+            "cache_read_tokens": 800,
+            "output_tokens": 150
+        });
+        accumulate_usage(&row, &mut usage);
+        assert_eq!(usage.model.as_deref(), Some("gemini-4-hydrogen-high"));
+        assert_eq!(usage.input_tokens, 1200);
+        assert_eq!(usage.cache_read_tokens, 800);
+        assert_eq!(usage.output_tokens, 150);
+        assert_eq!(usage.turns, 1);
     }
 }

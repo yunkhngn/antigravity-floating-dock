@@ -185,7 +185,7 @@ async function main() {
       } catch {}
     };
 
-    socket.setTimeout(5000, () => reply({ ok: false, error: "timeout" }));
+    socket.setTimeout(15000, () => reply({ ok: false, error: "timeout" }));
 
     socket.on("data", (chunk) => {
       if (finished) return;
@@ -239,6 +239,31 @@ async function main() {
         try {
           const result = app.sendMessage(cid, message);
           reply({ ok: true, conversationId: cid, result });
+        } catch (err) {
+          reply({ ok: false, error: err?.message || String(err) });
+        }
+        return;
+      }
+
+      if (action === "new_conversation") {
+        const message = String(req?.message || "");
+        const model = req?.model ? String(req.model).trim() : "";
+        if (!message.trim()) {
+          reply({ ok: false, error: "empty_message" });
+          return;
+        }
+        try {
+          const result = app.startConversation(
+            message,
+            model ? { model } : {},
+          );
+          const cid =
+            result?.conversationId || result?.conversation_id || result?.id || null;
+          reply({
+            ok: true,
+            conversationId: cid ? String(cid) : null,
+            result,
+          });
         } catch (err) {
           reply({ ok: false, error: err?.message || String(err) });
         }

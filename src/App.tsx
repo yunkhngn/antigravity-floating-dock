@@ -46,6 +46,8 @@ const PREVIEW_SNAPSHOT: DockSnapshot = {
   recentEvents: [],
   selectedConversationId: null,
   conversations: [],
+  availableModels: [],
+  sessionUsage: null,
   queuedMessages: [],
   transcriptTail: [],
   transcriptError: null,

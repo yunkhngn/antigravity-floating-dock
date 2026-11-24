@@ -118,6 +118,23 @@ pub struct ConversationSummary {
     pub project_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelOption {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTokenUsage {
+    pub model: Option<String>,
+    pub input_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub output_tokens: u64,
+    pub turns: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AttachmentInfo {
@@ -159,6 +176,8 @@ pub struct DockSnapshot {
     pub recent_events: Vec<DockEvent>,
     pub selected_conversation_id: Option<String>,
     pub conversations: Vec<ConversationSummary>,
+    pub available_models: Vec<ModelOption>,
+    pub session_usage: Option<SessionTokenUsage>,
     pub queued_messages: Vec<QueuedMessage>,
     pub transcript_tail: Vec<TranscriptMessage>,
     pub transcript_error: Option<String>,

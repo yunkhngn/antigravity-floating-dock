@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { formatRelativeTime, resolveBubbleText, shortenId, stateLabel } from "./format";
+import {
+  formatRelativeTime,
+  formatTokenCount,
+  resolveBubbleText,
+  shortenId,
+  stateLabel,
+} from "./format";
 import type { DockSnapshot } from "./types";
 
 function makeSnapshot(overrides: Partial<DockSnapshot> = {}): DockSnapshot {
@@ -31,6 +37,8 @@ function makeSnapshot(overrides: Partial<DockSnapshot> = {}): DockSnapshot {
     recentEvents: [],
     selectedConversationId: null,
     conversations: [],
+    availableModels: [],
+    sessionUsage: null,
     queuedMessages: [],
     transcriptTail: [],
     transcriptError: null,
@@ -82,5 +90,12 @@ describe("format helpers", () => {
   it("never reports unknown state as completed", () => {
     expect(stateLabel("unknown")).toBe("Unknown");
     expect(stateLabel("idle")).toBe("Idle");
+  });
+
+  it("formats token counts concisely", () => {
+    expect(formatTokenCount(450)).toBe("450");
+    expect(formatTokenCount(1450)).toBe("1.5k");
+    expect(formatTokenCount(42300)).toBe("42k");
+    expect(formatTokenCount(1250000)).toBe("1.3M");
   });
 });

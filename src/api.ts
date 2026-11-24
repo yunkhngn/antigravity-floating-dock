@@ -10,6 +10,7 @@ import type {
   DockSnapshot,
   HookMutationResult,
   HookStatus,
+  ModelOption,
   PermissionStatus,
 } from "./types";
 
@@ -67,6 +68,12 @@ export async function openAntigravity(
   });
 }
 
+export async function openExternalUrl(
+  url: "https://github.com/yunkhngn" | "https://buymeacoffee.com/yunkhngn",
+): Promise<void> {
+  return invoke("open_external_url", { url });
+}
+
 export async function sendMessageToAntigravity(
   request: DesktopSendRequest,
 ): Promise<DesktopSendResult> {
@@ -95,6 +102,17 @@ export async function selectConversation(
   conversationId: string | null,
 ): Promise<DockSnapshot> {
   return invoke<DockSnapshot>("select_conversation", { conversationId });
+}
+
+export async function refreshModels(): Promise<ModelOption[]> {
+  return invoke<ModelOption[]>("refresh_models");
+}
+
+export async function startNewConversation(
+  message: string,
+  model: string | null,
+): Promise<DockSnapshot> {
+  return invoke<DockSnapshot>("start_new_conversation", { message, model });
 }
 
 export async function saveAttachmentImage(

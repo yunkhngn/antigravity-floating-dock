@@ -78,6 +78,19 @@ export interface ConversationSummary {
   projectId: string | null;
 }
 
+export interface ModelOption {
+  id: string;
+  label: string;
+}
+
+export interface SessionTokenUsage {
+  model: string | null;
+  inputTokens: number;
+  cacheReadTokens: number;
+  outputTokens: number;
+  turns: number;
+}
+
 export interface AttachmentInfo {
   path: string;
   name: string;
@@ -105,6 +118,8 @@ export interface DockSnapshot {
   recentEvents: DockEvent[];
   selectedConversationId: string | null;
   conversations: ConversationSummary[];
+  availableModels: ModelOption[];
+  sessionUsage: SessionTokenUsage | null;
   queuedMessages: QueuedMessage[];
   transcriptTail: TranscriptMessage[];
   transcriptError: string | null;

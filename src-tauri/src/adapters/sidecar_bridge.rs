@@ -187,6 +187,34 @@ pub fn send_message_via_sidecar(conversation_id: &str, message: &str) -> Result<
     }
 }
 
+pub fn start_conversation_via_sidecar(
+    message: &str,
+    model: Option<&str>,
+) -> Result<Option<String>, String> {
+    let payload = json!({
+        "action": "new_conversation",
+        "message": message,
+        "model": model,
+    });
+
+    let resp = call_bridge(payload, Duration::from_secs(14))?;
+    if resp.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+        let cid = resp
+            .get("conversationId")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string);
+        Ok(cid)
+    } else {
+        let err = resp
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Sidecar bridge rejected new_conversation");
+        Err(err.to_string())
+    }
+}
+
 fn call_bridge(mut body: Value, read_timeout: Duration) -> Result<Value, String> {
     let sock = bridge_socket_path();
     let tok_path = bridge_token_path();

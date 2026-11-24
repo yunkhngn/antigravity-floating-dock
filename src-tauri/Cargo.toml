@@ -1,6 +1,6 @@
 [package]
 name = "antigravity-floating-dock"
-version = "1.0.0"
+version = "1.1.0"
 description = "Lightweight macOS floating companion for monitoring Antigravity agent activity"
 authors = ["Antigravity Floating Dock Contributors"]
 edition = "2021"

@@ -42,7 +42,7 @@ pnpm tauri build --target aarch64-apple-darwin
 ```
 Actual bundle outputs are written under:
 - `src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Antigravity Floating Dock.app`
-- `src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Antigravity Floating Dock_0.1.0_aarch64.dmg`
+- `src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/Antigravity Floating Dock_1.1.0_aarch64.dmg`
 
 ## Setup & Hook Configuration
 
@@ -74,3 +74,9 @@ Actual bundle outputs are written under:
    rm -rf "/Applications/Antigravity Floating Dock.app"
    rm -rf "$HOME/Library/Application Support/com.antigravity.floating-dock"
    ```
+
+## Credits & License
+
+- **Author:** [@yunkhngn](https://github.com/yunkhngn)
+- **Support:** [Buy Me a Coffee](https://buymeacoffee.com/yunkhngn)
+- **License:** [MIT](LICENSE)

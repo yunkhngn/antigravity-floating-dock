@@ -24,6 +24,7 @@ use crate::adapters::desktop_interaction::{
 use crate::hooks::{HookMutationResult, HookStatus};
 use crate::models::{
     normalize_hook_payload, AttachmentInfo, ConversationSummary, DockSettings, DockSnapshot,
+    ModelOption,
 };
 use crate::session::SessionAdapter;
 use crate::state::{
@@ -149,6 +150,22 @@ fn open_antigravity(
 }
 
 #[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let trimmed = url.trim();
+    if trimmed != "https://github.com/yunkhngn" && trimmed != "https://buymeacoffee.com/yunkhngn" {
+        return Err("URL is not in the allowlist.".to_string());
+    }
+    let status = std::process::Command::new("open")
+        .arg(trimmed)
+        .status()
+        .map_err(|e| format!("Failed to open browser: {e}"))?;
+    if !status.success() {
+        return Err(format!("Failed to open link (exit status {status})"));
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn send_message_to_antigravity(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
@@ -249,6 +266,62 @@ fn select_conversation(
     conversation_id: Option<String>,
 ) -> DockSnapshot {
     state.select_conversation(conversation_id, Some(&app))
+}
+
+#[tauri::command]
+async fn refresh_models(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<ModelOption>, String> {
+    let state_ref = Arc::clone(state.inner());
+    let app_clone = app.clone();
+    tokio::task::spawn_blocking(move || state_ref.refresh_models(Some(&app_clone)))
+        .await
+        .map_err(|e| format!("Failed to fetch models: {e}"))?
+}
+
+#[tauri::command]
+async fn start_new_conversation(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    message: String,
+    model: Option<String>,
+) -> Result<DockSnapshot, String> {
+    let trimmed = message.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("Message cannot be empty.".to_string());
+    }
+    let clean_model = model
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let msg_chars = trimmed.chars().count();
+
+    let created_cid = tokio::task::spawn_blocking({
+        let m = clean_model.clone();
+        let body = trimmed.clone();
+        move || adapters::sidecar_bridge::start_conversation_via_sidecar(&body, m.as_deref())
+    })
+    .await
+    .map_err(|e| format!("Failed to start conversation: {e}"))??;
+
+    state.logger.log(
+        "INFO",
+        &format!(
+            "Started new conversation via sidecar cid={:?} model={:?} chars={}",
+            created_cid, clean_model, msg_chars
+        ),
+    );
+
+    let state_ref = Arc::clone(state.inner());
+    let app_clone = app.clone();
+    let _ = tokio::task::spawn_blocking(move || state_ref.refresh_conversations(Some(&app_clone))).await;
+
+    if let Some(cid) = created_cid {
+        Ok(state.select_conversation(Some(cid), Some(&app)))
+    } else {
+        state.emit_snapshot(&app);
+        Ok(state.snapshot())
+    }
 }
 
 #[tauri::command]
@@ -585,6 +658,7 @@ pub fn run() {
             install_hooks,
             uninstall_hooks,
             open_antigravity,
+            open_external_url,
             send_message_to_antigravity,
             flush_queue_item,
             remove_queue_item,
@@ -594,6 +668,8 @@ pub fn run() {
             inspect_antigravity_ui,
             refresh_conversations,
             select_conversation,
+            refresh_models,
+            start_new_conversation,
             save_attachment_image,
             emit_sample_event,
             get_diagnostics,
@@ -632,8 +708,16 @@ pub fn run() {
                 }
                 apply_surface_to_windows(&handle, &state, &glass_style);
 
-                // Preload Antigravity sessions and latest transcript immediately on launch.
+                // Preload Antigravity sessions, latest transcript, and CLI models asynchronously.
                 let _ = state.refresh_conversations(None);
+                let preload_state = Arc::clone(&state);
+                let preload_handle = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        preload_state.refresh_models(Some(&preload_handle))
+                    })
+                    .await;
+                });
 
                 setup_tray(&handle, &state)?;
                 apply_global_shortcuts(&handle, &state);

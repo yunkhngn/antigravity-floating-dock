@@ -17,6 +17,21 @@ export function shortenId(value: string | null, keep = 8): string {
   return `${value.slice(0, keep)}…`;
 }
 
+export function formatTokenCount(count: number): string {
+  if (count >= 1_000_000) {
+    const val = (Math.round(count / 100_000) / 10).toFixed(1);
+    return `${val.replace(/\.0$/, "")}M`;
+  }
+  if (count >= 1_000) {
+    if (count >= 10_000) {
+      return `${Math.round(count / 1_000)}k`;
+    }
+    const val = (Math.round(count / 100) / 10).toFixed(1);
+    return `${val.replace(/\.0$/, "")}k`;
+  }
+  return String(count);
+}
+
 export function stateLabel(state: AgentActivityState | undefined): string {
   switch (state) {
     case "working":
