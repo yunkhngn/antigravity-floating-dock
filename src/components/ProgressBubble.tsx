@@ -1,8 +1,15 @@
 import type { MouseEvent } from "react";
-import { Activity, AlertTriangle, Bot, Pin, PinOff, X } from "lucide-react";
 import { hideBubble, setBubblePinned, showChat } from "../api";
 import { resolveBubbleText } from "../format";
 import type { DockSnapshot } from "../types";
+import {
+  FilledAlertIcon,
+  FilledCloseIcon,
+  FilledOrbIcon,
+  FilledPinIcon,
+  FilledPinOffIcon,
+  FilledWaveIcon,
+} from "./FilledIcons";
 
 interface ProgressBubbleProps {
   snapshot: DockSnapshot;
@@ -27,9 +34,9 @@ export function ProgressBubble({ snapshot }: ProgressBubbleProps) {
   }
 
   function renderOrbIcon() {
-    if (tone === "working") return <Activity size={14} />;
-    if (tone === "error" || tone === "needsAttention") return <AlertTriangle size={14} />;
-    return <Bot size={14} />;
+    if (tone === "working") return <FilledWaveIcon size={16} />;
+    if (tone === "error" || tone === "needsAttention") return <FilledAlertIcon size={16} />;
+    return <FilledOrbIcon size={16} />;
   }
 
   return (
@@ -63,7 +70,7 @@ export function ProgressBubble({ snapshot }: ProgressBubbleProps) {
           title={snapshot.bubblePinned ? "Unpin bubble" : "Pin bubble"}
           aria-label={snapshot.bubblePinned ? "Unpin bubble" : "Pin bubble"}
         >
-          {snapshot.bubblePinned ? <PinOff size={13} /> : <Pin size={13} />}
+          {snapshot.bubblePinned ? <FilledPinOffIcon size={14} /> : <FilledPinIcon size={14} />}
         </button>
         <button
           type="button"
@@ -72,7 +79,7 @@ export function ProgressBubble({ snapshot }: ProgressBubbleProps) {
           title="Dismiss bubble"
           aria-label="Dismiss bubble"
         >
-          <X size={13} />
+          <FilledCloseIcon size={14} />
         </button>
       </div>
     </div>

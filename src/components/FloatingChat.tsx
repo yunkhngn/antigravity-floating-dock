@@ -1,31 +1,17 @@
-import { useEffect, useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
 import {
-  Activity,
-  AlertTriangle,
-  Bot,
-  CheckCircle2,
-  Copy,
-  ExternalLink,
-  Maximize2,
-  Minimize2,
-  Minus,
-  Pin,
-  PinOff,
-  RefreshCw,
-  Send,
-  Settings,
-  ShieldCheck,
-  Terminal,
-  Trash2,
-  Wrench,
-} from "lucide-react";
-import {
-  emitSampleEvent,
-  getDiagnostics,
+  clearQueue,
+  flushQueueItem,
   hideChat,
   installHooks,
   openAntigravity,
   quitApp,
+  refreshConversations,
+  removeQueueItem,
+  requestAccessibilityPermission,
+  saveAttachmentImage,
+  selectConversation,
+  sendMessageToAntigravity,
   setBubblePinned,
   setChatExpanded,
   uninstallHooks,
@@ -33,7 +19,32 @@ import {
   verifyHooks,
 } from "../api";
 import { formatRelativeTime, shortenId, stateLabel } from "../format";
-import type { DockSettings, DockSnapshot, HookStatus } from "../types";
+import {
+  FilledCheckCircleIcon,
+  FilledCloseIcon,
+  FilledCollapseIcon,
+  FilledCopyIcon,
+  FilledExpandIcon,
+  FilledExternalIcon,
+  FilledImageIcon,
+  FilledMinusIcon,
+  FilledOrbIcon,
+  FilledPinIcon,
+  FilledPinOffIcon,
+  FilledRefreshIcon,
+  FilledSendIcon,
+  FilledSettingsIcon,
+  FilledShieldCheckIcon,
+  FilledTrashIcon,
+  FilledWaveIcon,
+} from "./FilledIcons";
+import { MessageText } from "./MessageText";
+import type {
+  AttachmentInfo,
+  DockSettings,
+  DockSnapshot,
+  HookStatus,
+} from "../types";
 
 interface FloatingChatProps {
   snapshot: DockSnapshot;
@@ -42,14 +53,26 @@ interface FloatingChatProps {
 
 type ActiveTab = "activity" | "settings";
 
+interface AttachedImage extends AttachmentInfo {
+  previewUrl: string;
+}
+
 export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
   const [tab, setTab] = useState<ActiveTab>("activity");
   const [expanded, setExpanded] = useState(false);
+  const [showInspector, setShowInspector] = useState(false);
+  const [expandedActivityKey, setExpandedActivityKey] = useState<Record<string, boolean>>({});
+  const [liveStepsExpanded, setLiveStepsExpanded] = useState(true);
   const [draft, setDraft] = useState("");
+  const [attachments, setAttachments] = useState<AttachedImage[]>([]);
+  const [sending, setSending] = useState(false);
+  const [loadingSessions, setLoadingSessions] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [permissionNeeded, setPermissionNeeded] = useState(false);
   const [hookStatus, setHookStatus] = useState<HookStatus | null>(null);
   const [hookBusy, setHookBusy] = useState(false);
-  const [diagnostics, setDiagnostics] = useState<string[]>([]);
   const [settingsForm, setSettingsForm] = useState<DockSettings>(snapshot.settings);
 
   useEffect(() => {
@@ -68,15 +91,128 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
   }, []);
 
   useEffect(() => {
+    void refreshConversations().catch(() => {});
+  }, [snapshot.status.sidecarConnected]);
+
+  useEffect(() => {
     if (tab === "settings") {
       void verifyHooks().then(setHookStatus).catch(() => {});
-      void getDiagnostics().then(setDiagnostics).catch(() => {});
     }
   }, [tab]);
 
+  useEffect(() => {
+    if (tab !== "activity") return;
+    const el = chatScrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [
+    tab,
+    snapshot.transcriptTail,
+    snapshot.recentEvents,
+    snapshot.selectedConversationId,
+  ]);
+
   const useCssFallback = snapshot.status.vibrancyMode === "css-fallback";
-  const { status, activeEvent, recentEvents, transcriptTail, transcriptError, sessionCapabilities } =
-    snapshot;
+  const {
+    status,
+    activeEvent,
+    recentEvents,
+    selectedConversationId,
+    conversations,
+    queuedMessages,
+    transcriptTail,
+    transcriptError,
+    sessionCapabilities,
+  } = snapshot;
+
+  const targetConversationId =
+    selectedConversationId ?? activeEvent?.conversationId ?? conversations[0]?.id ?? null;
+  const selectedConversationMeta = conversations.find((c) => c.id === targetConversationId);
+  const isTargetWorking =
+    (activeEvent?.activityState === "working" &&
+      (!targetConversationId ||
+        !activeEvent.conversationId ||
+        activeEvent.conversationId === targetConversationId)) ||
+    selectedConversationMeta?.runState === "RUN_STATE_RUNNING";
+  const targetRecentSteps = recentEvents
+    .filter(
+      (ev) =>
+        !targetConversationId ||
+        !ev.conversationId ||
+        ev.conversationId === targetConversationId,
+    )
+    .slice(0, 12)
+    .reverse();
+
+  function composePayloadText(): string {
+    const text = draft.trim();
+    if (attachments.length === 0) return text;
+    const refs = attachments
+      .map((img) => `[Attached image: ${img.path}]`)
+      .join("\n");
+    return text ? `${text}\n\n${refs}` : `Please inspect the attached image(s):\n${refs}`;
+  }
+
+  async function handleAddImageFiles(files: FileList | File[]) {
+    const list = Array.from(files).filter((f) => f.type.startsWith("image/"));
+    if (list.length === 0) return;
+
+    const remaining = Math.max(0, 4 - attachments.length);
+    if (remaining === 0) {
+      setActionNotice("Maximum 4 images per message.");
+      return;
+    }
+
+    for (const file of list.slice(0, remaining)) {
+      try {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ""));
+          reader.onerror = () => reject(new Error("Failed to read image"));
+          reader.readAsDataURL(file);
+        });
+        const saved = await saveAttachmentImage(file.name || "pasted.png", dataUrl);
+        setAttachments((prev) => [...prev, { ...saved, previewUrl: dataUrl }]);
+      } catch (err) {
+        setActionNotice(err instanceof Error ? err.message : String(err));
+      }
+    }
+  }
+
+  function handleComposerPaste(e: ClipboardEvent<HTMLTextAreaElement>) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const imageFiles: File[] = [];
+    for (const item of Array.from(items)) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        const file = item.getAsFile();
+        if (file) imageFiles.push(file);
+      }
+    }
+    if (imageFiles.length > 0) {
+      e.preventDefault();
+      void handleAddImageFiles(imageFiles);
+    }
+  }
+
+  async function handleRefreshSessions() {
+    setLoadingSessions(true);
+    try {
+      await refreshConversations();
+    } catch (err) {
+      setActionNotice(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoadingSessions(false);
+    }
+  }
+
+  async function handleSelectSession(cid: string) {
+    try {
+      await selectConversation(cid === "__auto__" ? null : cid);
+    } catch (err) {
+      setActionNotice(err instanceof Error ? err.message : String(err));
+    }
+  }
 
   async function handleToggleExpand() {
     const next = !expanded;
@@ -85,7 +221,7 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
   }
 
   async function handleCopyDraft(alsoOpen: boolean) {
-    const text = draft.trim();
+    const text = composePayloadText();
     if (!text) {
       if (alsoOpen) {
         await handleOpenAntigravity();
@@ -97,11 +233,14 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
       await navigator.clipboard.writeText(text);
       setActionNotice(
         alsoOpen
-          ? "Copied draft to clipboard and focused Antigravity (direct same-session send is not supported)."
+          ? "Copied draft to clipboard and focused Antigravity."
           : "Copied draft to clipboard.",
       );
       if (alsoOpen) {
-        await openAntigravity(sessionCapabilities.sourceProduct);
+        await openAntigravity(
+          sessionCapabilities.sourceProduct,
+          targetConversationId,
+        );
       }
     } catch {
       setActionNotice("Could not copy to clipboard.");
@@ -110,8 +249,81 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
 
   async function handleOpenAntigravity() {
     try {
-      await openAntigravity(sessionCapabilities.sourceProduct);
+      await openAntigravity(
+        sessionCapabilities.sourceProduct,
+        targetConversationId,
+      );
       setActionNotice("Focused Antigravity.");
+    } catch (err) {
+      setActionNotice(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleSendMessage() {
+    const text = composePayloadText();
+    if (!text || sending) return;
+
+    setSending(true);
+    setPermissionNeeded(false);
+    setActionNotice(null);
+
+    try {
+      const result = await sendMessageToAntigravity({
+        message: text,
+        expectedConversationId: targetConversationId,
+        expectedConversationTitle: selectedConversationMeta?.title ?? null,
+        expectedWorkspacePath: activeEvent?.workspacePath ?? null,
+        sourceProduct: sessionCapabilities.sourceProduct,
+        idempotencyKey: `${Date.now()}-${text.length}`,
+        allowKeyboardFallback: true,
+        allowCoordinateFallback: true,
+      });
+
+      if (
+        (result.status === "Success" && result.verifiedSubmitted) ||
+        result.status === "Queued"
+      ) {
+        setDraft("");
+        setAttachments([]);
+      } else if (result.status === "PermissionDenied") {
+        setPermissionNeeded(true);
+        setActionNotice(result.permissionStatus.instructions || result.message);
+      } else {
+        setActionNotice(result.message);
+      }
+      onRefresh();
+    } catch (err) {
+      setActionNotice(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function handleGrantAccessibility() {
+    try {
+      const perms = await requestAccessibilityPermission();
+      setPermissionNeeded(!perms.accessibilityTrusted);
+      setActionNotice(perms.instructions);
+      onRefresh();
+    } catch (err) {
+      setActionNotice(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  function applyGlassPreview(next: DockSettings) {
+    setSettingsForm(next);
+    const root = document.documentElement.style;
+    root.setProperty("--glass-tint-alpha", String(next.glassTintOpacity));
+    root.setProperty("--card-alpha", String(next.cardOpacity));
+    root.setProperty("--glass-blur", `${next.glassBlurPx}px`);
+  }
+
+  async function persistSettings(next: DockSettings, notice?: string) {
+    applyGlassPreview(next);
+    try {
+      await updateSettings(next);
+      if (notice) setActionNotice(notice);
+      onRefresh();
     } catch (err) {
       setActionNotice(err instanceof Error ? err.message : String(err));
     }
@@ -120,9 +332,7 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
   function handleComposerKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
       e.preventDefault();
-      if (!sessionCapabilities.canSendMessage) {
-        void handleCopyDraft(true);
-      }
+      void handleSendMessage();
     }
   }
 
@@ -166,16 +376,6 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
     }
   }
 
-  async function handleCopySnippet() {
-    if (!hookStatus?.snippet) return;
-    try {
-      await navigator.clipboard.writeText(hookStatus.snippet);
-      setActionNotice("Copied hook JSON snippet.");
-    } catch {
-      setActionNotice("Failed to copy snippet.");
-    }
-  }
-
   const connectionDotClass = !status.antigravityRunning
     ? "err"
     : !status.hookInstalled || !status.ipcListening
@@ -188,8 +388,8 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
       ? "Hook not installed"
       : !status.ipcListening
         ? "IPC offline"
-        : activeEvent?.conversationId
-          ? `Session ${shortenId(activeEvent.conversationId)}`
+        : targetConversationId
+          ? `Session ${shortenId(targetConversationId)}`
           : "Connected · Waiting for events";
 
   return (
@@ -197,7 +397,7 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
       <header className="chat-header" data-tauri-drag-region>
         <div className="chat-brand" data-tauri-drag-region>
           <div className="brand-icon">
-            <Bot size={14} />
+            <FilledOrbIcon size={16} />
           </div>
           <div className="brand-meta" data-tauri-drag-region>
             <div className="brand-title">Antigravity Floating Dock</div>
@@ -216,7 +416,7 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
             title={snapshot.bubblePinned ? "Unpin status bubble" : "Pin status bubble"}
             aria-label={snapshot.bubblePinned ? "Unpin status bubble" : "Pin status bubble"}
           >
-            {snapshot.bubblePinned ? <PinOff size={14} /> : <Pin size={14} />}
+            {snapshot.bubblePinned ? <FilledPinOffIcon size={15} /> : <FilledPinIcon size={15} />}
           </button>
           <button
             type="button"
@@ -225,7 +425,7 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
             title={expanded ? "Compact size" : "Expand panel"}
             aria-label={expanded ? "Compact size" : "Expand panel"}
           >
-            {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+            {expanded ? <FilledCollapseIcon size={15} /> : <FilledExpandIcon size={15} />}
           </button>
           <button
             type="button"
@@ -234,7 +434,7 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
             title="Hide panel (Esc)"
             aria-label="Hide panel"
           >
-            <Minus size={14} />
+            <FilledMinusIcon size={15} />
           </button>
         </div>
       </header>
@@ -245,7 +445,7 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
           className={`tab-btn ${tab === "activity" ? "active" : ""}`}
           onClick={() => setTab("activity")}
         >
-          <Activity size={12} />
+          <FilledWaveIcon size={13} />
           <span>Session</span>
         </button>
         <button
@@ -253,14 +453,74 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
           className={`tab-btn ${tab === "settings" ? "active" : ""}`}
           onClick={() => setTab("settings")}
         >
-          <Settings size={12} />
-          <span>Setup &amp; Settings</span>
+          <FilledSettingsIcon size={13} />
+          <span>Settings</span>
         </button>
       </div>
 
       {tab === "activity" ? (
         <>
-          <div className="chat-body">
+          <div className="session-toolbar">
+            <div className="session-picker-row">
+              <select
+                className="session-select"
+                value={selectedConversationId ?? "__auto__"}
+                onChange={(e) => void handleSelectSession(e.target.value)}
+                aria-label="Select conversation session"
+              >
+                <option value="__auto__">
+                  Auto (
+                  {activeEvent?.conversationId || conversations[0]?.id
+                    ? shortenId(activeEvent?.conversationId ?? conversations[0]?.id ?? "")
+                    : "latest"}
+                  )
+                </option>
+                {conversations.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.title} {c.runState === "RUN_STATE_RUNNING" ? "●" : ""} ({shortenId(c.id)})
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={() => void handleRefreshSessions()}
+                disabled={loadingSessions}
+                title="Refresh Antigravity sessions"
+              >
+                <FilledRefreshIcon size={13} />
+              </button>
+              <button
+                type="button"
+                className={`pill-toggle ${showInspector ? "active" : ""}`}
+                onClick={() => setShowInspector((prev) => !prev)}
+                title="Toggle session details and recent events"
+              >
+                <span className={`badge ${activeEvent?.activityState ?? "unknown"}`}>
+                  {stateLabel(activeEvent?.activityState)}
+                </span>
+                <span className="pill-toggle-label">
+                  {showInspector ? "Hide info" : "Info"}
+                </span>
+              </button>
+            </div>
+            {(activeEvent?.summary || selectedConversationMeta?.title) && (
+              <div className="session-status-line">
+                <span>
+                  {activeEvent?.summary ??
+                    selectedConversationMeta?.title ??
+                    "Ready"}
+                </span>
+                {activeEvent && (
+                  <span className="session-status-time">
+                    {formatRelativeTime(activeEvent.timestampMs)}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="chat-body" ref={chatScrollRef}>
             {!status.antigravityRunning && (
               <div className="alert-banner error">
                 <div>
@@ -268,7 +528,7 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
                   background to stream live agent events.
                 </div>
                 <button type="button" className="btn" onClick={() => void handleOpenAntigravity()}>
-                  <ExternalLink size={12} />
+                  <FilledExternalIcon size={13} />
                   <span>Open</span>
                 </button>
               </div>
@@ -277,11 +537,11 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
             {!status.hookInstalled && (
               <div className="alert-banner">
                 <div>
-                  <strong>Hook bridge not configured.</strong> Install the companion entry in{" "}
-                  <code>~/.gemini/config/hooks.json</code> to receive live lifecycle events.
+                  <strong>Bridge not configured.</strong> Install the Antigravity Bridge in Settings
+                  to stream live events and send in background.
                 </div>
                 <button type="button" className="btn" onClick={() => setTab("settings")}>
-                  <Wrench size={12} />
+                  <FilledSettingsIcon size={13} />
                   <span>Setup</span>
                 </button>
               </div>
@@ -299,268 +559,568 @@ export function FloatingChat({ snapshot, onRefresh }: FloatingChatProps) {
             )}
 
             {actionNotice && (
-              <div className="alert-banner info">
+              <div className={`alert-banner ${permissionNeeded ? "" : "info"}`}>
                 <span>{actionNotice}</span>
-                <button type="button" className="icon-btn" onClick={() => setActionNotice(null)}>
-                  <Minus size={12} />
-                </button>
+                <div className="btn-row">
+                  {permissionNeeded && (
+                    <button
+                      type="button"
+                      className="btn primary"
+                      onClick={() => void handleGrantAccessibility()}
+                    >
+                      <FilledShieldCheckIcon size={13} />
+                      <span>Grant Access</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    onClick={() => {
+                      setActionNotice(null);
+                      setPermissionNeeded(false);
+                    }}
+                  >
+                    <FilledCloseIcon size={13} />
+                  </button>
+                </div>
               </div>
             )}
 
-            <section className="card">
-              <div className="card-title-row">
-                <span className="card-label">Active Session</span>
-                <span className={`badge ${activeEvent?.activityState ?? "unknown"}`}>
-                  {stateLabel(activeEvent?.activityState)}
-                </span>
-              </div>
-
-              {activeEvent ? (
-                <div className="kv-grid">
-                  <span className="kv-key">Status</span>
-                  <span className="kv-val">{activeEvent.summary}</span>
-                  <span className="kv-key">Session</span>
-                  <span className="kv-val">{activeEvent.conversationId ?? "Not supplied"}</span>
-                  <span className="kv-key">Workspace</span>
-                  <span className="kv-val">{activeEvent.workspacePath ?? "Not supplied"}</span>
-                  <span className="kv-key">Model</span>
-                  <span className="kv-val">{activeEvent.modelName ?? "Not supplied"}</span>
-                  <span className="kv-key">Updated</span>
-                  <span className="kv-val">{formatRelativeTime(activeEvent.timestampMs)}</span>
+            {showInspector && (
+              <section className="card inspector-card">
+                <div className="card-title-row">
+                  <span className="card-label">Session Metadata</span>
+                  <button type="button" className="icon-btn" onClick={onRefresh} title="Refresh">
+                    <FilledRefreshIcon size={13} />
+                  </button>
                 </div>
-              ) : (
-                <div className="hint-text">
-                  No lifecycle events received yet. Start a turn in Antigravity or emit a sample
-                  event in Setup &amp; Settings.
-                </div>
-              )}
-            </section>
+                {activeEvent || selectedConversationMeta ? (
+                  <div className="kv-grid">
+                    <span className="kv-key">Session</span>
+                    <span className="kv-val">{targetConversationId ?? "Not supplied"}</span>
+                    <span className="kv-key">Workspace</span>
+                    <span className="kv-val">{activeEvent?.workspacePath ?? "Not supplied"}</span>
+                    <span className="kv-key">Model</span>
+                    <span className="kv-val">{activeEvent?.modelName ?? "Not supplied"}</span>
+                  </div>
+                ) : (
+                  <div className="hint-text">No lifecycle events received yet.</div>
+                )}
 
-            <section className="card">
-              <div className="card-title-row">
-                <span className="card-label">Recent Events</span>
-                <button type="button" className="icon-btn" onClick={onRefresh} title="Refresh">
-                  <RefreshCw size={12} />
-                </button>
-              </div>
-              {recentEvents.length > 0 ? (
-                <div className="event-list">
-                  {recentEvents.slice(0, 8).map((ev) => (
-                    <div key={ev.id} className="event-row">
-                      <div className="event-row-main">
-                        <span className="event-row-title">{ev.summary}</span>
-                        {ev.detail && <span className="event-row-detail">{ev.detail}</span>}
+                {recentEvents.length > 0 && (
+                  <div className="event-list">
+                    <span className="card-label">Recent Events</span>
+                    {recentEvents.slice(0, 5).map((ev) => (
+                      <div key={ev.id} className="event-row">
+                        <div className="event-row-main">
+                          <span className="event-row-title">{ev.summary}</span>
+                          {ev.detail && <span className="event-row-detail">{ev.detail}</span>}
+                        </div>
+                        <span className="event-row-time">{formatRelativeTime(ev.timestampMs)}</span>
                       </div>
-                      <span className="event-row-time">{formatRelativeTime(ev.timestampMs)}</span>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="hint-text">Bounded event buffer is empty.</div>
-              )}
-            </section>
+                    ))}
+                  </div>
+                )}
+              </section>
+            )}
 
-            <section className="card">
-              <div className="card-title-row">
-                <span className="card-label">Transcript Context (Read-Only)</span>
-                <span className="hint-text">{sessionCapabilities.sourceProduct}</span>
-              </div>
-              {transcriptTail.length > 0 ? (
-                <div className="transcript-list">
-                  {transcriptTail.map((msg, idx) => (
-                    <div key={`${msg.role}-${idx}`} className="transcript-item">
-                      <div className="transcript-role">{msg.role}</div>
-                      <div>{msg.text}</div>
+            {transcriptTail.length > 0 ? (
+              <div className="transcript-stream">
+                {transcriptTail.map((msg, idx) => {
+                  const steps = msg.steps ?? [];
+                  const stepKey = `${idx}-${msg.role}`;
+                  const isOpen = !!expandedActivityKey[stepKey];
+                  if (msg.role === "Activity") {
+                    return (
+                      <div key={stepKey} className="activity-trace">
+                        <button
+                          type="button"
+                          className="activity-trace-toggle"
+                          onClick={() =>
+                            setExpandedActivityKey((prev) => ({
+                              ...prev,
+                              [stepKey]: !isOpen,
+                            }))
+                          }
+                        >
+                          <span>
+                            {steps[steps.length - 1] ?? "Agent steps"} ({steps.length})
+                          </span>
+                          <span className="activity-chevron">{isOpen ? "⌄" : "›"}</span>
+                        </button>
+                        {isOpen && (
+                          <div className="activity-step-list">
+                            {steps.map((step, sIdx) => (
+                              <div key={sIdx} className="activity-step-row">
+                                {step}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  }
+                  return (
+                    <div
+                      key={stepKey}
+                      className={`chat-msg ${msg.role === "You" ? "user" : "assistant"}`}
+                    >
+                      {msg.role === "You" ? (
+                        <div className="chat-msg-user-box">
+                          <MessageText text={msg.text} />
+                        </div>
+                      ) : (
+                        <div className="chat-msg-assistant-prose">
+                          {steps.length > 0 && (
+                            <div className="activity-trace">
+                              <button
+                                type="button"
+                                className="activity-trace-toggle"
+                                onClick={() =>
+                                  setExpandedActivityKey((prev) => ({
+                                    ...prev,
+                                    [stepKey]: !isOpen,
+                                  }))
+                                }
+                              >
+                                <span>
+                                  {steps.length} step{steps.length > 1 ? "s" : ""} ·{" "}
+                                  {steps[steps.length - 1]}
+                                </span>
+                                <span className="activity-chevron">{isOpen ? "⌄" : "›"}</span>
+                              </button>
+                              {isOpen && (
+                                <div className="activity-step-list">
+                                  {steps.map((step, sIdx) => (
+                                    <div key={sIdx} className="activity-step-row">
+                                      {step}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          <MessageText text={msg.text} />
+                        </div>
+                      )}
                     </div>
-                  ))}
+                  );
+                })}
+                {isTargetWorking && (
+                  <div className="live-activity-card">
+                    <button
+                      type="button"
+                      className="activity-trace-toggle live"
+                      onClick={() => setLiveStepsExpanded((prev) => !prev)}
+                    >
+                      <span className="live-pulse-dot" />
+                      <span>
+                        {activeEvent?.summary ?? "Working…"}{" "}
+                        {targetRecentSteps.length > 0
+                          ? `· ${targetRecentSteps.length} steps`
+                          : ""}
+                      </span>
+                      <span className="activity-chevron">
+                        {liveStepsExpanded ? "⌄" : "›"}
+                      </span>
+                    </button>
+                    {liveStepsExpanded && targetRecentSteps.length > 0 && (
+                      <div className="activity-step-list">
+                        {targetRecentSteps.map((ev) => (
+                          <div key={ev.id} className="activity-step-row">
+                            <span>{ev.summary}</span>
+                            {ev.detail && (
+                              <span className="activity-step-detail">{ev.detail}</span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="chat-empty-state">
+                <FilledOrbIcon size={20} />
+                <div className="chat-empty-title">
+                  {selectedConversationMeta?.title ?? "Antigravity Floating Dock"}
                 </div>
-              ) : (
                 <div className="hint-text">
                   {transcriptError ??
-                    "No readable JSONL transcript available for the current event."}
+                    "Select a session above or send a message below to chat with Antigravity."}
                 </div>
-              )}
-            </section>
+                {conversations.length > 0 && (
+                  <div className="btn-row" style={{ justifyContent: "center", marginTop: 6 }}>
+                    {conversations.slice(0, 4).map((c) => (
+                      <button
+                        key={c.id}
+                        type="button"
+                        className="btn"
+                        onClick={() => void handleSelectSession(c.id)}
+                      >
+                        <span>{c.title}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           <footer className="composer-area">
-            <div className="limitation-note">
-              <AlertTriangle size={11} style={{ verticalAlign: "text-bottom", marginRight: 4 }} />
-              {sessionCapabilities.limitationReason}
-            </div>
-            <textarea
-              className="composer-input"
-              placeholder="Draft a follow-up prompt (⌘+Enter copies & focuses Antigravity)…"
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={handleComposerKeyDown}
-            />
-            <div className="composer-footer">
-              <div className="btn-row">
+            {queuedMessages.length > 0 && (
+              <div className="queue-panel">
+                <div className="queue-header">
+                  <span>Pending Queue ({queuedMessages.length})</span>
+                  <button
+                    type="button"
+                    className="queue-clear-btn"
+                    onClick={() => void clearQueue()}
+                  >
+                    Clear
+                  </button>
+                </div>
+                <div className="queue-list">
+                  {queuedMessages.map((q) => (
+                    <div key={q.id} className={`queue-row ${q.status}`}>
+                      <div className="queue-copy">
+                        <span className="queue-preview">{q.preview}</span>
+                        {q.error && <span className="queue-err">{q.error}</span>}
+                      </div>
+                      <div className="queue-actions">
+                        {q.status !== "sending" && (
+                          <button
+                            type="button"
+                            className="icon-btn"
+                            onClick={() => void flushQueueItem(q.id)}
+                            title="Send now"
+                            aria-label="Send queued message now"
+                          >
+                            <FilledSendIcon size={12} />
+                          </button>
+                        )}
+                        {q.status !== "sending" && (
+                          <button
+                            type="button"
+                            className="icon-btn"
+                            onClick={() => void removeQueueItem(q.id)}
+                            title="Remove from queue"
+                            aria-label="Remove from queue"
+                          >
+                            <FilledCloseIcon size={12} />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className="composer-box">
+              {attachments.length > 0 && (
+                <div className="attachment-strip">
+                  {attachments.map((img) => (
+                    <div key={img.path} className="attachment-chip">
+                      <img src={img.previewUrl} alt={img.name} className="attachment-thumb" />
+                      <span className="attachment-name">{img.name}</span>
+                      <button
+                        type="button"
+                        className="icon-btn"
+                        onClick={() =>
+                          setAttachments((prev) => prev.filter((item) => item.path !== img.path))
+                        }
+                        aria-label={`Remove ${img.name}`}
+                      >
+                        <FilledCloseIcon size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <textarea
+                className="composer-input"
+                placeholder="Ask anything, @ to mention, ⌘+V to paste image…"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={handleComposerKeyDown}
+                onPaste={handleComposerPaste}
+                disabled={sending}
+              />
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                hidden
+                onChange={(e) => {
+                  if (e.target.files) {
+                    void handleAddImageFiles(e.target.files);
+                  }
+                  e.target.value = "";
+                }}
+              />
+              <div className="composer-footer">
+                <div className="btn-row">
+                  <button
+                    type="button"
+                    className="composer-tool-btn"
+                    disabled={sending || attachments.length >= 4}
+                    onClick={() => fileInputRef.current?.click()}
+                    title="Attach image (or paste with ⌘+V)"
+                  >
+                    <FilledImageIcon size={14} />
+                    <span>Image</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="composer-tool-btn"
+                    disabled={(!draft.trim() && attachments.length === 0) || sending}
+                    onClick={() => void handleCopyDraft(false)}
+                    title="Copy draft"
+                  >
+                    <FilledCopyIcon size={13} />
+                    <span>Copy</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="composer-tool-btn"
+                    onClick={() => void handleCopyDraft(true)}
+                    title="Open Antigravity"
+                  >
+                    <FilledExternalIcon size={13} />
+                    <span>
+                      {draft.trim() || attachments.length > 0 ? "Copy & Open" : "Open AGY"}
+                    </span>
+                  </button>
+                </div>
                 <button
                   type="button"
-                  className="btn"
-                  disabled={!draft.trim()}
-                  onClick={() => void handleCopyDraft(false)}
+                  className="btn primary composer-send-btn"
+                  disabled={
+                    (!draft.trim() && attachments.length === 0) ||
+                    sending ||
+                    !status.antigravityRunning
+                  }
+                  onClick={() => void handleSendMessage()}
                 >
-                  <Copy size={12} />
-                  <span>Copy</span>
-                </button>
-                <button type="button" className="btn" onClick={() => void handleCopyDraft(true)}>
-                  <ExternalLink size={12} />
-                  <span>{draft.trim() ? "Copy & Open AGY" : "Open Antigravity"}</span>
+                  <FilledSendIcon size={13} />
+                  <span>
+                    {sending
+                      ? "Sending…"
+                      : activeEvent?.activityState === "working" || queuedMessages.length > 0
+                        ? "Queue"
+                        : "Send"}
+                  </span>
                 </button>
               </div>
-              <button
-                type="button"
-                className="btn primary"
-                disabled
-                title={sessionCapabilities.limitationReason}
-              >
-                <Send size={12} />
-                <span>Send (Unavailable)</span>
-              </button>
             </div>
           </footer>
         </>
-      ) : (
-        <div className="chat-body">
-          {actionNotice && (
-            <div className="alert-banner info">
-              <span>{actionNotice}</span>
-              <button type="button" className="icon-btn" onClick={() => setActionNotice(null)}>
-                <Minus size={12} />
-              </button>
-            </div>
-          )}
-
-          <section className="card">
-            <div className="card-title-row">
-              <span className="card-label">Antigravity Hook Bridge</span>
-              <span className="badge">
-                {hookStatus?.hookInstalled ? (
-                  <>
-                    <CheckCircle2 size={11} style={{ verticalAlign: "text-bottom", marginRight: 3 }} />
-                    Installed
-                  </>
-                ) : (
-                  "Not installed"
-                )}
-              </span>
-            </div>
-            <div className="hint-text">
-              Adds only the <code>antigravity-floating-dock</code> entry to{" "}
-              <code>{hookStatus?.hooksFilePath ?? "~/.gemini/config/hooks.json"}</code> after
-              backing up existing hooks.
-            </div>
-            {hookStatus?.error && <div className="alert-banner error">{hookStatus.error}</div>}
-            <div className="btn-row">
-              <button
-                type="button"
-                className="btn primary"
-                disabled={hookBusy}
-                onClick={() => void handleInstallHooks()}
-              >
-                <ShieldCheck size={12} />
-                <span>{hookStatus?.hookInstalled ? "Repair / Update Hook" : "Install Hook"}</span>
-              </button>
-              <button
-                type="button"
-                className="btn"
-                disabled={hookBusy}
-                onClick={() => void verifyHooks().then(setHookStatus)}
-              >
-                <RefreshCw size={12} />
-                <span>Verify</span>
-              </button>
-              <button
-                type="button"
-                className="btn danger"
-                disabled={hookBusy || !hookStatus?.hookInstalled}
-                onClick={() => void handleUninstallHooks()}
-              >
-                <Trash2 size={12} />
-                <span>Uninstall</span>
-              </button>
-              <button type="button" className="btn" onClick={() => void handleCopySnippet()}>
-                <Copy size={12} />
-                <span>Copy JSON</span>
-              </button>
-            </div>
-            {hookStatus?.snippet && <pre className="code-block">{hookStatus.snippet}</pre>}
-          </section>
-
-          <section className="card">
-            <div className="card-title-row">
-              <span className="card-label">Shortcuts &amp; Surface</span>
-              <span className="hint-text">Material: {status.vibrancyMode}</span>
-            </div>
-            <div className="field-group">
-              <label className="field-label" htmlFor="chat-shortcut">
-                Toggle Floating Chat (e.g. Alt+Space, CommandOrControl+Shift+Space)
-              </label>
-              <input
-                id="chat-shortcut"
-                className="text-input"
-                value={settingsForm.toggleChatShortcut}
-                onChange={(e) =>
-                  setSettingsForm({ ...settingsForm, toggleChatShortcut: e.target.value })
-                }
-              />
-            </div>
-            <div className="field-group">
-              <label className="field-label" htmlFor="bubble-shortcut">
-                Toggle / Pin Progress Bubble
-              </label>
-              <input
-                id="bubble-shortcut"
-                className="text-input"
-                value={settingsForm.toggleBubbleShortcut}
-                onChange={(e) =>
-                  setSettingsForm({ ...settingsForm, toggleBubbleShortcut: e.target.value })
-                }
-              />
-            </div>
-            <div className="btn-row">
-              <button type="button" className="btn primary" onClick={() => void handleSaveSettings()}>
-                <span>Save Shortcuts</span>
-              </button>
-            </div>
-          </section>
-
-          <section className="card">
-            <div className="card-title-row">
-              <span className="card-label">Fixture Verification &amp; Diagnostics</span>
-              <span className="hint-text">IPC: {status.ipcListening ? "Listening" : "Offline"}</span>
-            </div>
-            <div className="btn-row">
-              <button
-                type="button"
-                className="btn"
-                onClick={() => void emitSampleEvent("working")}
-              >
-                <Terminal size={12} />
-                <span>Test Working</span>
-              </button>
-              <button type="button" className="btn" onClick={() => void emitSampleEvent("idle")}>
-                <span>Test Idle Stop</span>
-              </button>
-              <button type="button" className="btn" onClick={() => void emitSampleEvent("error")}>
-                <span>Test Error Stop</span>
-              </button>
-            </div>
-            <div className="hint-text">Socket: {status.ipcSocketPath}</div>
-            {diagnostics.length > 0 && (
-              <pre className="code-block">{diagnostics.slice(-12).join("\n")}</pre>
+        ) : (
+          <div className="chat-body">
+            {actionNotice && (
+              <div className="alert-banner info">
+                <span>{actionNotice}</span>
+                <button type="button" className="icon-btn" onClick={() => setActionNotice(null)}>
+                  <FilledCloseIcon size={13} />
+                </button>
+              </div>
             )}
-            <div className="btn-row">
-              <button type="button" className="btn danger" onClick={() => void quitApp()}>
-                <span>Quit Antigravity Floating Dock</span>
-              </button>
-            </div>
-          </section>
-        </div>
-      )}
+
+            <section className="card">
+              <div className="card-title-row">
+                <span className="card-label">Liquid Glass</span>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() =>
+                    void persistSettings(
+                      {
+                        ...settingsForm,
+                        glassStyle: "regular",
+                        glassTintOpacity: 0.42,
+                        cardOpacity: 0.50,
+                        glassBlurPx: 12,
+                      },
+                      "Reset Liquid Glass defaults.",
+                    )
+                  }
+                >
+                  <span>Reset</span>
+                </button>
+              </div>
+
+              <div className="segmented-row">
+                {(
+                  [
+                    { id: "clear", label: "Clear" },
+                    { id: "regular", label: "Regular" },
+                    { id: "vibrancy", label: "Classic Blur" },
+                  ] as const
+                ).map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    className={`seg-btn ${settingsForm.glassStyle === opt.id ? "active" : ""}`}
+                    onClick={() =>
+                      void persistSettings({ ...settingsForm, glassStyle: opt.id })
+                    }
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="slider-row">
+                <div className="slider-header">
+                  <span>Surface Tint</span>
+                  <span>{Math.round(settingsForm.glassTintOpacity * 100)}%</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={85}
+                  value={Math.round(settingsForm.glassTintOpacity * 100)}
+                  className="range-input"
+                  onChange={(e) => {
+                    const next = {
+                      ...settingsForm,
+                      glassTintOpacity: Number(e.target.value) / 100,
+                    };
+                    applyGlassPreview(next);
+                  }}
+                  onPointerUp={() => void persistSettings(settingsForm)}
+                  onKeyUp={() => void persistSettings(settingsForm)}
+                />
+              </div>
+
+              <div className="slider-row">
+                <div className="slider-header">
+                  <span>Card Opacity</span>
+                  <span>{Math.round(settingsForm.cardOpacity * 100)}%</span>
+                </div>
+                <input
+                  type="range"
+                  min={5}
+                  max={90}
+                  value={Math.round(settingsForm.cardOpacity * 100)}
+                  className="range-input"
+                  onChange={(e) => {
+                    const next = {
+                      ...settingsForm,
+                      cardOpacity: Number(e.target.value) / 100,
+                    };
+                    applyGlassPreview(next);
+                  }}
+                  onPointerUp={() => void persistSettings(settingsForm)}
+                  onKeyUp={() => void persistSettings(settingsForm)}
+                />
+              </div>
+
+              <div className="slider-row">
+                <div className="slider-header">
+                  <span>Backdrop Blur</span>
+                  <span>{settingsForm.glassBlurPx}px</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={32}
+                  value={settingsForm.glassBlurPx}
+                  className="range-input"
+                  onChange={(e) => {
+                    const next = {
+                      ...settingsForm,
+                      glassBlurPx: Number(e.target.value),
+                    };
+                    applyGlassPreview(next);
+                  }}
+                  onPointerUp={() => void persistSettings(settingsForm)}
+                  onKeyUp={() => void persistSettings(settingsForm)}
+                />
+              </div>
+            </section>
+
+            <section className="card">
+              <div className="card-title-row">
+                <span className="card-label">Antigravity Bridge</span>
+                <span className="badge">
+                  {status.sidecarConnected ? (
+                    <>
+                      <FilledCheckCircleIcon size={12} />
+                      <span style={{ marginLeft: 4 }}>Connected</span>
+                    </>
+                  ) : hookStatus?.hookInstalled ? (
+                    "Restart AGY"
+                  ) : (
+                    "Not installed"
+                  )}
+                </span>
+              </div>
+              {hookStatus?.error && <div className="alert-banner error">{hookStatus.error}</div>}
+              <div className="btn-row">
+                <button
+                  type="button"
+                  className="btn primary"
+                  disabled={hookBusy}
+                  onClick={() => void handleInstallHooks()}
+                >
+                  <FilledShieldCheckIcon size={13} />
+                  <span>{hookStatus?.hookInstalled ? "Update Bridge" : "Install Bridge"}</span>
+                </button>
+                <button
+                  type="button"
+                  className="btn danger"
+                  disabled={hookBusy || !hookStatus?.hookInstalled}
+                  onClick={() => void handleUninstallHooks()}
+                >
+                  <FilledTrashIcon size={13} />
+                  <span>Uninstall</span>
+                </button>
+              </div>
+            </section>
+
+            <section className="card">
+              <div className="card-title-row">
+                <span className="card-label">Shortcuts</span>
+              </div>
+              <div className="field-group">
+                <label className="field-label" htmlFor="chat-shortcut">
+                  Toggle Floating Chat
+                </label>
+                <input
+                  id="chat-shortcut"
+                  className="text-input"
+                  value={settingsForm.toggleChatShortcut}
+                  onChange={(e) =>
+                    setSettingsForm({ ...settingsForm, toggleChatShortcut: e.target.value })
+                  }
+                />
+              </div>
+              <div className="field-group">
+                <label className="field-label" htmlFor="bubble-shortcut">
+                  Toggle / Pin Progress Bubble
+                </label>
+                <input
+                  id="bubble-shortcut"
+                  className="text-input"
+                  value={settingsForm.toggleBubbleShortcut}
+                  onChange={(e) =>
+                    setSettingsForm({ ...settingsForm, toggleBubbleShortcut: e.target.value })
+                  }
+                />
+              </div>
+              <div className="btn-row">
+                <button type="button" className="btn primary" onClick={() => void handleSaveSettings()}>
+                  <span>Save Shortcuts</span>
+                </button>
+                <button type="button" className="btn danger" onClick={() => void quitApp()}>
+                  <span>Quit App</span>
+                </button>
+              </div>
+            </section>
+          </div>
+        )}
     </div>
   );
 }

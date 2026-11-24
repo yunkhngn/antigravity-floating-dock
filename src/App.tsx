@@ -23,6 +23,8 @@ const PREVIEW_SNAPSHOT: DockSnapshot = {
     antigravityRunning: false,
     hookInstalled: false,
     relayInstalled: false,
+    sidecarInstalled: false,
+    sidecarConnected: false,
     ipcListening: false,
     ipcSocketPath: "~/Library/Application Support/com.antigravity.floating-dock/run/dock.sock",
     lastEventAtMs: null,
@@ -35,9 +37,16 @@ const PREVIEW_SNAPSHOT: DockSnapshot = {
     pinBubble: false,
     autoHideIdleMs: 8000,
     launchAtLoginHintAcknowledged: false,
+    glassStyle: "regular",
+    glassTintOpacity: 0.42,
+    cardOpacity: 0.50,
+    glassBlurPx: 12,
   },
   activeEvent: null,
   recentEvents: [],
+  selectedConversationId: null,
+  conversations: [],
+  queuedMessages: [],
   transcriptTail: [],
   transcriptError: null,
   sessionCapabilities: {
@@ -61,6 +70,14 @@ export function App() {
       .then(setSnapshot)
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    const s = snapshot.settings;
+    const root = document.documentElement.style;
+    root.setProperty("--glass-tint-alpha", String(s.glassTintOpacity ?? 0.42));
+    root.setProperty("--card-alpha", String(s.cardOpacity ?? 0.50));
+    root.setProperty("--glass-blur", `${s.glassBlurPx ?? 12}px`);
+  }, [snapshot.settings]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;

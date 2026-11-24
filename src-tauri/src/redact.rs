@@ -25,6 +25,10 @@ fn is_sensitive_key(key: &str) -> bool {
 }
 
 pub fn redact_string(input: &str) -> String {
+    redact_text_with_limit(input, MAX_STRING_LEN)
+}
+
+pub fn redact_text_with_limit(input: &str, max_chars: usize) -> String {
     let mut cleaned = input.to_string();
     for prefix in ["Bearer ", "bearer ", "AIza", "ghp_", "gho_", "sk-"] {
         if let Some(pos) = cleaned.find(prefix) {
@@ -32,8 +36,8 @@ pub fn redact_string(input: &str) -> String {
             return format!("{head}[REDACTED]");
         }
     }
-    if cleaned.chars().count() > MAX_STRING_LEN {
-        cleaned = cleaned.chars().take(MAX_STRING_LEN).collect::<String>();
+    if cleaned.chars().count() > max_chars {
+        cleaned = cleaned.chars().take(max_chars).collect::<String>();
         cleaned.push_str("…");
     }
     cleaned

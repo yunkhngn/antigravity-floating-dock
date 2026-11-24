@@ -44,13 +44,17 @@ pub struct DockEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct DockSettings {
     pub toggle_chat_shortcut: String,
     pub toggle_bubble_shortcut: String,
     pub pin_bubble: bool,
     pub auto_hide_idle_ms: u64,
     pub launch_at_login_hint_acknowledged: bool,
+    pub glass_style: String,
+    pub glass_tint_opacity: f64,
+    pub card_opacity: f64,
+    pub glass_blur_px: u32,
 }
 
 impl Default for DockSettings {
@@ -61,6 +65,10 @@ impl Default for DockSettings {
             pin_bubble: false,
             auto_hide_idle_ms: 8000,
             launch_at_login_hint_acknowledged: false,
+            glass_style: "regular".to_string(),
+            glass_tint_opacity: 0.42,
+            card_opacity: 0.50,
+            glass_blur_px: 12,
         }
     }
 }
@@ -71,6 +79,8 @@ pub struct ConnectionStatus {
     pub antigravity_running: bool,
     pub hook_installed: bool,
     pub relay_installed: bool,
+    pub sidecar_installed: bool,
+    pub sidecar_connected: bool,
     pub ipc_listening: bool,
     pub ipc_socket_path: String,
     pub last_event_at_ms: Option<u64>,
@@ -84,6 +94,8 @@ pub struct TranscriptMessage {
     pub role: String,
     pub text: String,
     pub timestamp: Option<String>,
+    #[serde(default)]
+    pub steps: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,11 +110,56 @@ pub struct SessionCapabilities {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ConversationSummary {
+    pub id: String,
+    pub title: String,
+    pub run_state: String,
+    pub update_time: String,
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentInfo {
+    pub path: String,
+    pub name: String,
+    pub size_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum QueuedMessageStatus {
+    Pending,
+    Sending,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueuedMessage {
+    pub id: String,
+    pub conversation_id: Option<String>,
+    pub conversation_title: Option<String>,
+    pub workspace_path: Option<String>,
+    pub source_product: Option<String>,
+    #[serde(skip_serializing)]
+    pub message: String,
+    pub preview: String,
+    pub created_at_ms: u64,
+    pub status: QueuedMessageStatus,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DockSnapshot {
     pub status: ConnectionStatus,
     pub settings: DockSettings,
     pub active_event: Option<DockEvent>,
     pub recent_events: Vec<DockEvent>,
+    pub selected_conversation_id: Option<String>,
+    pub conversations: Vec<ConversationSummary>,
+    pub queued_messages: Vec<QueuedMessage>,
     pub transcript_tail: Vec<TranscriptMessage>,
     pub transcript_error: Option<String>,
     pub session_capabilities: SessionCapabilities,

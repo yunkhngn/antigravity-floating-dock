@@ -41,6 +41,10 @@ pub fn logs_dir() -> PathBuf {
     app_support_dir().join("logs")
 }
 
+pub fn attachments_dir() -> PathBuf {
+    app_support_dir().join("attachments")
+}
+
 pub fn diagnostic_log_path() -> PathBuf {
     logs_dir().join("dock.log")
 }

@@ -4,6 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::adapters::sidecar_bridge;
 use crate::paths;
 
 const HOOK_KEY: &str = "antigravity-floating-dock";
@@ -17,6 +18,8 @@ pub struct HookStatus {
     pub hook_enabled: bool,
     pub relay_path: String,
     pub relay_installed: bool,
+    pub sidecar_installed: bool,
+    pub sidecar_connected: bool,
     pub snippet: String,
     pub error: Option<String>,
 }
@@ -124,6 +127,7 @@ pub fn inspect_hook_status() -> HookStatus {
     let hooks_path = paths::agy_hooks_path();
     let relay_path = paths::relay_bin_path();
     let relay_installed = is_executable_file(&relay_path);
+    let sidecar = sidecar_bridge::inspect_sidecar_status();
     let snippet = copyable_hook_snippet();
 
     if !hooks_path.exists() {
@@ -134,6 +138,8 @@ pub fn inspect_hook_status() -> HookStatus {
             hook_enabled: false,
             relay_path: relay_path.display().to_string(),
             relay_installed,
+            sidecar_installed: sidecar.installed,
+            sidecar_connected: sidecar.connected,
             snippet,
             error: None,
         };
@@ -155,6 +161,8 @@ pub fn inspect_hook_status() -> HookStatus {
                     hook_enabled,
                     relay_path: relay_path.display().to_string(),
                     relay_installed,
+                    sidecar_installed: sidecar.installed,
+                    sidecar_connected: sidecar.connected,
                     snippet,
                     error: None,
                 }
@@ -166,6 +174,8 @@ pub fn inspect_hook_status() -> HookStatus {
                 hook_enabled: false,
                 relay_path: relay_path.display().to_string(),
                 relay_installed,
+                sidecar_installed: sidecar.installed,
+                sidecar_connected: sidecar.connected,
                 snippet,
                 error: Some("Existing hooks.json root must be a JSON object".to_string()),
             },
@@ -176,6 +186,8 @@ pub fn inspect_hook_status() -> HookStatus {
                 hook_enabled: false,
                 relay_path: relay_path.display().to_string(),
                 relay_installed,
+                sidecar_installed: sidecar.installed,
+                sidecar_connected: sidecar.connected,
                 snippet,
                 error: Some(format!("Existing hooks.json is not valid JSON: {e}")),
             },
@@ -187,6 +199,8 @@ pub fn inspect_hook_status() -> HookStatus {
             hook_enabled: false,
             relay_path: relay_path.display().to_string(),
             relay_installed,
+            sidecar_installed: sidecar.installed,
+            sidecar_connected: sidecar.connected,
             snippet,
             error: Some(format!("Cannot read hooks.json: {e}")),
         },
@@ -269,12 +283,26 @@ pub fn install_hook() -> Result<HookMutationResult, String> {
     root_map.insert(HOOK_KEY.to_string(), build_hook_entry(&cmd));
     write_hooks_map_atomically(&hooks_path, &root_map)?;
 
+    let sidecar_note = match sidecar_bridge::install_sidecar() {
+        Ok(s) if s.connected => " Sidecar bridge is connected.",
+        Ok(_) => " Sidecar bridge installed (restart Antigravity once to connect).",
+        Err(err) => {
+            let status = inspect_hook_status();
+            return Ok(HookMutationResult {
+                status,
+                backup_path,
+                message: format!("Installed hook, but sidecar setup warned: {err}"),
+            });
+        }
+    };
+
     let status = inspect_hook_status();
     Ok(HookMutationResult {
         status,
         backup_path,
-        message: "Installed antigravity-floating-dock hook into ~/.gemini/config/hooks.json."
-            .to_string(),
+        message: format!(
+            "Installed antigravity-floating-dock hook into ~/.gemini/config/hooks.json.{sidecar_note}"
+        ),
     })
 }
 
@@ -303,15 +331,17 @@ pub fn uninstall_hook() -> Result<HookMutationResult, String> {
     if removed {
         write_hooks_map_atomically(&hooks_path, &root_map)?;
     }
+    let _ = sidecar_bridge::uninstall_sidecar();
 
     let status = inspect_hook_status();
     Ok(HookMutationResult {
         status,
         backup_path,
         message: if removed {
-            "Removed antigravity-floating-dock entry while preserving existing hooks.".to_string()
+            "Removed antigravity-floating-dock hook and sidecar while preserving existing hooks."
+                .to_string()
         } else {
-            "antigravity-floating-dock entry was not present in hooks.json.".to_string()
+            "Removed sidecar bridge; hook entry was not present in hooks.json.".to_string()
         },
     })
 }

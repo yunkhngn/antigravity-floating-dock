@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Antigravity Floating Dock",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "identifier": "com.antigravity.floating-dock",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -16,8 +16,8 @@
         "label": "bubble",
         "title": "Antigravity Floating Dock — Status",
         "url": "/?surface=bubble",
-        "width": 332,
-        "height": 58,
+        "width": 364,
+        "height": 64,
         "resizable": false,
         "maximizable": false,
         "minimizable": false,
@@ -34,10 +34,10 @@
         "label": "chat",
         "title": "Antigravity Floating Dock",
         "url": "/?surface=chat",
-        "width": 440,
-        "height": 540,
-        "minWidth": 360,
-        "minHeight": 420,
+        "width": 472,
+        "height": 584,
+        "minWidth": 380,
+        "minHeight": 450,
         "resizable": true,
         "maximizable": false,
         "minimizable": true,
@@ -47,7 +47,7 @@
         "visible": false,
         "focus": true,
         "skipTaskbar": true,
-        "shadow": true
+        "shadow": false
       }
     ],
     "security": {
